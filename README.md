@@ -22,7 +22,7 @@ UART: **115200 8N1**. Mount the module ~5 cm away from the ESP Wi‑Fi antenna a
 
 ## SoftAP monitor (chart + filter + thresholds)
 
-![RadarSensor SoftAP monitor UI](docs/monitor.png)
+![RadarSensor SoftAP monitor UI](docs/monitor_v2.png)
 
 1. Flash firmware and power the board.
 2. Join Wi‑Fi AP **`RadarSensor`** (open / no password).
