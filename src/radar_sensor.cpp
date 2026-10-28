@@ -1,6 +1,7 @@
 #include "radar_sensor.h"
 
 #include "board_pins.h"
+#include "radar_filter.h"
 
 #include <Arduino.h>
 #include <Preferences.h>
@@ -13,14 +14,19 @@ static const size_t kLineCap = 128;
 static const char *kNvsNs = "radar";
 static const float kDefClearS = 5.0f;
 static const float kDefMovS = 1.0f;
+static const bool kDefFiltOn = true;
+static const float kDefFiltQ = 0.05f;
+static const float kDefFiltR = 0.4f;
 
 static char s_line[kLineCap];
 static size_t s_len = 0;
 
-static RadarLive s_live = {RADAR_MODE_NONE, 0.f, 0};
+static RadarLive s_live = {RADAR_MODE_NONE, 0.f, 0.f, 0};
+static float s_filtDist = 0.f;
 static uint32_t s_lastMovMs = 0;
+static bool s_filterCleared = true;
 static RadarConfig s_cfg = {8.f, 60.f, 30.f, 20.f, kDefClearS, kDefMovS,
-                            false, 0, 0};
+                            kDefFiltOn, kDefFiltQ, kDefFiltR, false, 0, 0};
 static Preferences s_prefs;
 // Ignore get_all overwrites briefly after Apply (module ACK/get_all race).
 static uint32_t s_cfgHoldUntilMs = 0;
@@ -36,11 +42,19 @@ static float clampf(float v, float lo, float hi) {
   return v;
 }
 
-static void loadTimingFromNvs(void) {
+static void applyFilterParamsToModule(void) {
+  radarFilterSetParams(s_cfg.filt_q, s_cfg.filt_r);
+}
+
+static void loadEspLocalFromNvs(void) {
   s_prefs.begin(kNvsNs, true);
   s_cfg.clear_s = clampf(s_prefs.getFloat("clear_s", kDefClearS), 0.5f, 20.f);
   s_cfg.mov_s = clampf(s_prefs.getFloat("mov_s", kDefMovS), 0.5f, 10.f);
+  s_cfg.filter_enabled = s_prefs.getBool("filt_on", kDefFiltOn);
+  s_cfg.filt_q = clampf(s_prefs.getFloat("filt_q", kDefFiltQ), 0.01f, 0.5f);
+  s_cfg.filt_r = clampf(s_prefs.getFloat("filt_r", kDefFiltR), 0.1f, 2.0f);
   s_prefs.end();
+  applyFilterParamsToModule();
 }
 
 static void saveTimingToNvs(void) {
@@ -48,6 +62,18 @@ static void saveTimingToNvs(void) {
   s_prefs.putFloat("clear_s", s_cfg.clear_s);
   s_prefs.putFloat("mov_s", s_cfg.mov_s);
   s_prefs.end();
+}
+
+static void saveFilterToNvs(void) {
+  s_prefs.begin(kNvsNs, false);
+  s_prefs.putBool("filt_on", s_cfg.filter_enabled);
+  s_prefs.putFloat("filt_q", s_cfg.filt_q);
+  s_prefs.putFloat("filt_r", s_cfg.filt_r);
+  s_prefs.end();
+}
+
+static float activeDistance(void) {
+  return s_cfg.filter_enabled ? s_filtDist : s_live.distance_raw_m;
 }
 
 void radarSensorSendCmd(const char *cmd) {
@@ -60,12 +86,18 @@ void radarSensorSendCmd(const char *cmd) {
 
 bool radarSensorBegin(void) {
   s_len = 0;
-  s_live = {RADAR_MODE_NONE, 0.f, 0};
+  s_live = {RADAR_MODE_NONE, 0.f, 0.f, 0};
+  s_filtDist = 0.f;
   s_lastMovMs = 0;
-  s_cfg = {8.f, 60.f, 30.f, 20.f, kDefClearS, kDefMovS, false, 0, 0};
-  loadTimingFromNvs();
+  s_filterCleared = true;
+  s_cfg = {8.f, 60.f, 30.f, 20.f, kDefClearS, kDefMovS,
+           kDefFiltOn, kDefFiltQ, kDefFiltR, false, 0, 0};
+  loadEspLocalFromNvs();
+  radarFilterReset();
   Serial.printf("timing clear=%.1fs mov=%.1fs (ESP NVS)\n", s_cfg.clear_s,
                 s_cfg.mov_s);
+  Serial.printf("filter on=%d Q=%.2f R=%.1f\n", (int)s_cfg.filter_enabled,
+                s_cfg.filt_q, s_cfg.filt_r);
 
   Serial2.begin(RADAR_UART_BAUD, SERIAL_8N1, PIN_RADAR_RX, PIN_RADAR_TX);
   delay(200);
@@ -78,6 +110,8 @@ void radarSensorGetLive(RadarLive *out) {
     return;
   }
   *out = s_live;
+  out->distance_m = activeDistance();
+
   const uint32_t now = millis();
   const uint32_t clearMs =
       static_cast<uint32_t>(s_cfg.clear_s * 1000.f + 0.5f);
@@ -85,12 +119,20 @@ void radarSensorGetLive(RadarLive *out) {
 
   if (s_live.mode == RADAR_MODE_NONE || s_live.last_ms == 0) {
     out->mode = RADAR_MODE_NONE;
+    if (!s_filterCleared) {
+      radarFilterReset();
+      s_filterCleared = true;
+    }
     return;
   }
 
   // Clearance: hold last presence until clear_s after last detect.
   if ((now - s_live.last_ms) > clearMs) {
     out->mode = RADAR_MODE_NONE;
+    if (!s_filterCleared) {
+      radarFilterReset();
+      s_filterCleared = true;
+    }
     return;
   }
 
@@ -161,6 +203,18 @@ void radarSensorApplyConfig(float rmax, float mth1, float mth2, float mth3,
   // Skip immediate get_all — it raced and restored old values into s_cfg/UI.
   Serial.printf(">> apply done preferMthMov=%d (Reload to verify)\n",
                 (int)s_preferMthMov);
+}
+
+void radarSensorApplyFilterConfig(bool enabled, float q, float r) {
+  s_cfg.filter_enabled = enabled;
+  s_cfg.filt_q = clampf(q, 0.01f, 0.5f);
+  s_cfg.filt_r = clampf(r, 0.1f, 2.0f);
+  applyFilterParamsToModule();
+  saveFilterToNvs();
+  s_cfg.seq++;
+  s_cfg.updated_ms = millis();
+  Serial.printf(">> filter on=%d Q=%.2f R=%.1f\n", (int)s_cfg.filter_enabled,
+                s_cfg.filt_q, s_cfg.filt_r);
 }
 
 static void trimInPlace(char *s) {
@@ -270,13 +324,16 @@ static void handleLine(char *line) {
     float dist = strtof(eq + 1, nullptr);
     const uint32_t now = millis();
     s_live.mode = moving ? RADAR_MODE_MOV : RADAR_MODE_OCC;
-    s_live.distance_m = dist;
+    s_live.distance_raw_m = dist;
+    s_filtDist = radarFilterUpdate(dist);
+    s_live.distance_m = activeDistance();
     s_live.last_ms = now;
+    s_filterCleared = false;
     if (moving) {
       s_lastMovMs = now;
-      Serial.printf("MOV %.2f m\n", dist);
+      Serial.printf("MOV %.2f m (raw %.2f)\n", s_live.distance_m, dist);
     } else {
-      Serial.printf("OCC %.2f m\n", dist);
+      Serial.printf("OCC %.2f m (raw %.2f)\n", s_live.distance_m, dist);
     }
     return;
   }

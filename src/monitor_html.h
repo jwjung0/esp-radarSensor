@@ -88,6 +88,7 @@ static const char MONITOR_HTML[] PROGMEM = R"MONITORHTML(
       border: 1px solid var(--border);
       border-radius: .6rem;
       padding: 1rem;
+      margin-bottom: 1rem;
     }
     section h2 { font-size: 1.05rem; margin: 0 0 .75rem; }
     .sliders { display: flex; flex-direction: column; gap: .9rem; }
@@ -123,6 +124,63 @@ static const char MONITOR_HTML[] PROGMEM = R"MONITORHTML(
       line-height: 1;
       font-variant-numeric: tabular-nums;
     }
+    .switch-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: .9rem;
+      gap: 1rem;
+    }
+    .switch-row .label {
+      font-size: .9rem;
+      color: var(--text);
+    }
+    .switch-row .label .band {
+      display: block;
+      color: var(--muted);
+      font-size: .75rem;
+      margin-top: .15rem;
+    }
+    .switch {
+      position: relative;
+      width: 4.2rem;
+      height: 1.85rem;
+      border: none;
+      border-radius: 999px;
+      background: #2a3342;
+      cursor: pointer;
+      padding: 0;
+      flex: 0 0 auto;
+      min-width: 0;
+      transition: background .18s ease;
+    }
+    .switch.on { background: var(--accent); }
+    .switch .knob {
+      position: absolute;
+      top: .2rem;
+      left: .2rem;
+      width: 1.45rem;
+      height: 1.45rem;
+      border-radius: 50%;
+      background: #fff;
+      transition: transform .18s ease;
+      box-shadow: 0 1px 3px rgba(0,0,0,.35);
+    }
+    .switch.on .knob { transform: translateX(2.35rem); }
+    .switch .txt {
+      position: absolute;
+      top: 50%;
+      transform: translateY(-50%);
+      font-size: .65rem;
+      font-weight: 700;
+      letter-spacing: .04em;
+      color: #041018;
+      pointer-events: none;
+    }
+    .switch .txt.on-l { left: .45rem; opacity: 0; }
+    .switch .txt.off-l { right: .4rem; color: var(--muted); }
+    .switch.on .txt.on-l { opacity: 1; }
+    .switch.on .txt.off-l { opacity: 0; }
     .actions {
       display: flex;
       flex-wrap: wrap;
@@ -169,6 +227,37 @@ static const char MONITOR_HTML[] PROGMEM = R"MONITORHTML(
     </div>
 
     <section>
+      <h2>Filter</h2>
+      <div class="switch-row">
+        <div class="label">Distance filter
+          <span class="band">1D Kalman on raw</span>
+        </div>
+        <button type="button" id="filtSwitch" class="switch on" aria-pressed="true" title="Toggle filter">
+          <span class="txt on-l">ON</span>
+          <span class="txt off-l">OFF</span>
+          <span class="knob"></span>
+        </button>
+      </div>
+      <div class="sliders">
+        <div class="slider-row">
+          <label for="filt_q"><span>Track (Q) <span class="band">higher = faster · def 0.05</span></span><span class="val" id="filt_q_val">—</span></label>
+          <input id="filt_q" type="range" min="0.01" max="0.5" step="0.01" value="0.05">
+          <div class="slider-ends"><span>0.01</span><span>0.5</span></div>
+        </div>
+        <div class="slider-row">
+          <label for="filt_r"><span>Smooth (R) <span class="band">higher = smoother · def 0.4</span></span><span class="val" id="filt_r_val">—</span></label>
+          <input id="filt_r" type="range" min="0.1" max="2" step="0.1" value="0.4">
+          <div class="slider-ends"><span>0.1</span><span>2.0</span></div>
+        </div>
+      </div>
+      <div class="actions">
+        <button type="button" id="btnFilterApply">Apply</button>
+      </div>
+      <div class="status" id="filtStatus">Filter ready</div>
+      <p class="hint"><strong>Apply </strong> saves ESP NVS only (no radar flash). Chart distance uses filtered value when ON.</p>
+    </section>
+
+    <section>
       <h2>Thresholds</h2>
       <div class="sliders">
         <div class="slider-row">
@@ -207,7 +296,7 @@ static const char MONITOR_HTML[] PROGMEM = R"MONITORHTML(
         <button type="button" class="secondary" id="btnReload">Reload from sensor</button>
       </div>
       <div class="status" id="status">Starting live poll…</div>
-      <p class="hint">Chart uses filtered MOV/OCC (clearance + movement time on ESP). <strong>Apply</strong> writes radar flash + ESP timers. <strong>Reload</strong> overrides sliders from sensor <code>get_all</code> (+ ESP timers). Lower mth* = more sensitive.</p>
+      <p class="hint">Chart uses MOV/OCC with clearance + movement time on ESP. <strong>Apply</strong> writes radar flash + ESP timers. <strong>Reload</strong> overrides sliders from sensor <code>get_all</code> (+ ESP timers). Lower mth* = more sensitive.</p>
     </section>
   </main>
   <script>
@@ -216,14 +305,19 @@ static const char MONITOR_HTML[] PROGMEM = R"MONITORHTML(
     const points = [];
     let lastCfgSeq = -1;
     let formDirty = false;
+    let filtDirty = false;
     let forceReload = false;
+    let filterOn = true;
 
     const elMode = document.getElementById('mode');
     const elDis = document.getElementById('dis');
     const elStatus = document.getElementById('status');
+    const elFiltStatus = document.getElementById('filtStatus');
+    const elSwitch = document.getElementById('filtSwitch');
     const canvas = document.getElementById('chart');
     const ctx = canvas.getContext('2d');
     const fields = ['rmax', 'clear_s', 'mov_s', 'mth1', 'mth2', 'mth3'];
+    const filtFields = ['filt_q', 'filt_r'];
     const radarFields = ['rmax', 'mth1', 'mth2', 'mth3'];
     const limits = {
       rmax: { min: 0.4, max: 12, step: 0.1, decimals: 1, unit: ' m' },
@@ -231,7 +325,9 @@ static const char MONITOR_HTML[] PROGMEM = R"MONITORHTML(
       mov_s: { min: 0.5, max: 10, step: 0.5, decimals: 1, unit: ' s' },
       mth1: { min: 10, max: 600, step: 10, decimals: 0, unit: '' },
       mth2: { min: 10, max: 300, step: 10, decimals: 0, unit: '' },
-      mth3: { min: 10, max: 200, step: 10, decimals: 0, unit: '' }
+      mth3: { min: 10, max: 200, step: 10, decimals: 0, unit: '' },
+      filt_q: { min: 0.01, max: 0.5, step: 0.01, decimals: 2, unit: '' },
+      filt_r: { min: 0.1, max: 2, step: 0.1, decimals: 1, unit: '' }
     };
 
     function clamp(id, v) {
@@ -252,6 +348,12 @@ static const char MONITOR_HTML[] PROGMEM = R"MONITORHTML(
         (L.decimals ? n.toFixed(L.decimals) : String(n)) + L.unit;
     }
 
+    function setSwitchUi(on) {
+      filterOn = !!on;
+      elSwitch.classList.toggle('on', filterOn);
+      elSwitch.setAttribute('aria-pressed', filterOn ? 'true' : 'false');
+    }
+
     fields.forEach(id => {
       const el = document.getElementById(id);
       el.addEventListener('input', () => {
@@ -261,9 +363,31 @@ static const char MONITOR_HTML[] PROGMEM = R"MONITORHTML(
       syncLabel(id);
     });
 
+    filtFields.forEach(id => {
+      const el = document.getElementById(id);
+      el.addEventListener('input', () => {
+        filtDirty = true;
+        syncLabel(id);
+      });
+      syncLabel(id);
+    });
+
+    elSwitch.onclick = () => {
+      filtDirty = true;
+      setSwitchUi(!filterOn);
+    };
+
     function fillForm(d) {
+      if (!filtDirty) {
+        if (d.filter_on != null) setSwitchUi(!!d.filter_on);
+        filtFields.forEach(id => {
+          if (d[id] != null) {
+            document.getElementById(id).value = clamp(id, d[id]);
+            syncLabel(id);
+          }
+        });
+      }
       if (formDirty && !forceReload) return;
-      // Timing lives on ESP — always available.
       ['clear_s', 'mov_s'].forEach(id => {
         if (d[id] != null) {
           document.getElementById(id).value = clamp(id, d[id]);
@@ -290,7 +414,6 @@ static const char MONITOR_HTML[] PROGMEM = R"MONITORHTML(
         canvas.width = bw;
         canvas.height = bh;
       }
-      // Draw in CSS pixels so 1rem matches page text (no stretch).
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       return { w: cssW, h: cssH };
     }
@@ -313,7 +436,7 @@ static const char MONITOR_HTML[] PROGMEM = R"MONITORHTML(
       ctx.textAlign = 'right';
       ctx.textBaseline = 'middle';
       for (let i = 0; i < 5; i++) {
-        const frac = i / 4; // 0 top … 1 bottom
+        const frac = i / 4;
         const y = padT + frac * plotH;
         const val = maxY * (1 - frac);
         ctx.strokeStyle = '#2a3140';
@@ -354,18 +477,18 @@ static const char MONITOR_HTML[] PROGMEM = R"MONITORHTML(
         }
         points.push({ t: Date.now(), mode, dis: Number(d.dis) || 0 });
         drawChart();
+        fillForm(d);
+        const filtTag = d.filter_on ? 'filt ON' : 'filt OFF';
         if (d.cfg_ok) {
-          fillForm(d);
           elStatus.textContent =
             'Live OK · rmax=' + d.rmax +
             ' clear=' + d.clear_s + 's mov=' + d.mov_s + 's' +
             ' mth=' + d.mth1 + '/' + d.mth2 + '/' + d.mth3 +
-            ' (seq ' + d.cfg_seq + ')';
+            ' · ' + filtTag + ' (seq ' + d.cfg_seq + ')';
         } else {
-          fillForm(d);
           elStatus.textContent =
             'Live OK · clear=' + d.clear_s + 's mov=' + d.mov_s +
-            's · radar thresholds not loaded — tap Reload';
+            's · ' + filtTag + ' · radar thresholds not loaded — tap Reload';
         }
       } catch (e) {
         elStatus.textContent = 'Live poll failed — reconnect SoftAP?';
@@ -376,7 +499,6 @@ static const char MONITOR_HTML[] PROGMEM = R"MONITORHTML(
       const body = new URLSearchParams();
       fields.forEach(id => body.set(id, document.getElementById(id).value));
       elStatus.textContent = 'Applying + saving…';
-      // Keep dirty so live poll cannot overwrite sliders with stale get_all.
       formDirty = true;
       forceReload = false;
       try {
@@ -387,7 +509,6 @@ static const char MONITOR_HTML[] PROGMEM = R"MONITORHTML(
         });
         const d = await r.json();
         if (d.ok) {
-          // Lock sliders to what we applied (from server echo).
           fields.forEach(id => {
             if (d[id] != null) {
               document.getElementById(id).value = clamp(id, d[id]);
@@ -395,7 +516,7 @@ static const char MONITOR_HTML[] PROGMEM = R"MONITORHTML(
             }
           });
           lastCfgSeq = d.cfg_seq;
-          formDirty = true; // stay locked until Reload or user edits again
+          formDirty = true;
           elStatus.textContent =
             'Saved · rmax=' + d.rmax + ' mth=' + d.mth1 + '/' + d.mth2 + '/' + d.mth3 +
             ' · tap Reload later to verify sensor flash';
@@ -407,9 +528,44 @@ static const char MONITOR_HTML[] PROGMEM = R"MONITORHTML(
       }
     }
 
+    async function postFilter() {
+      const body = new URLSearchParams();
+      body.set('filter_on', filterOn ? '1' : '0');
+      filtFields.forEach(id => body.set(id, document.getElementById(id).value));
+      elFiltStatus.textContent = 'Applying filter…';
+      filtDirty = true;
+      try {
+        const r = await fetch('/api/filter', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body
+        });
+        const d = await r.json();
+        if (d.ok) {
+          setSwitchUi(!!d.filter_on);
+          filtFields.forEach(id => {
+            if (d[id] != null) {
+              document.getElementById(id).value = clamp(id, d[id]);
+              syncLabel(id);
+            }
+          });
+          filtDirty = false;
+          elFiltStatus.textContent =
+            'Filter saved · ' + (d.filter_on ? 'ON' : 'OFF') +
+            ' Q=' + d.filt_q + ' R=' + d.filt_r;
+        } else {
+          elFiltStatus.textContent = 'Error: ' + (d.err || 'unknown');
+        }
+      } catch (e) {
+        elFiltStatus.textContent = 'Apply filter failed — check SoftAP';
+      }
+    }
+
     document.getElementById('btnApply').onclick = () => postConfig();
+    document.getElementById('btnFilterApply').onclick = () => postFilter();
     document.getElementById('btnReload').onclick = async () => {
       formDirty = false;
+      filtDirty = false;
       forceReload = true;
       lastCfgSeq = -1;
       elStatus.textContent = 'Reloading — overriding sliders from sensor…';

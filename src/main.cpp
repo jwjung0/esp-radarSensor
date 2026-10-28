@@ -62,7 +62,7 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   Serial.println();
-  Serial.println("esp-ladarSensor — LD1125H UART2 + SoftAP monitor");
+  Serial.println("esp-radarsensor — LD1125H UART2 + SoftAP monitor");
   Serial.printf("  ESP RX2=GPIO%d <-> LD1125H TX\n", PIN_RADAR_RX);
   Serial.printf("  ESP TX2=GPIO%d <-> LD1125H RX\n", PIN_RADAR_TX);
   Serial.printf("  baud=%d  LED=GPIO%d\n", RADAR_UART_BAUD, BOARD_LED_PIN);

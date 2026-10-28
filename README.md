@@ -1,4 +1,4 @@
-# esp-ladarSensor
+# esp-radarsensor
 
 ESP32 firmware to test **HLK-LD1125H** 24 GHz radar sensitivity vs distance. Prints detections over USB Serial and serves a SoftAP web UI with a realtime distance chart and `rmax` / `mth*` config. Built with PlatformIO (Arduino framework), same stack as `esp-smartClock`.
 
@@ -20,7 +20,7 @@ ESP32 firmware to test **HLK-LD1125H** 24 GHz radar sensitivity vs distance. Pri
 
 UART: **115200 8N1**. Mount the module ~5 cm away from the ESP Wi‑Fi antenna and switching regulators to reduce false triggers.
 
-## SoftAP monitor (chart + thresholds)
+## SoftAP monitor (chart + filter + thresholds)
 
 ![RadarSensor SoftAP monitor UI](docs/monitor.png)
 
@@ -35,25 +35,31 @@ UART: **115200 8N1**. Mount the module ~5 cm away from the ESP Wi‑Fi antenna a
 
 - Live MOV/OCC + distance
 - Offline canvas chart (~60 s window)
-- Form: `rmax`, clearance, movement time, `mth1`–`mth3`
-  - **Apply** — write radar flash (`save`) + ESP timers (NVS), then `get_all`
-  - **Reload from sensor** — `get_all`; **overrides** current slider values
+- **Filter** panel (ESP-only): ON/OFF switch + Track(Q) / Smooth(R)
+  - Pipeline: 1D Kalman on raw distance (`radar_filter` module)
+  - **Apply filter** — ESP NVS only (does **not** rewrite radar flash)
+- **Thresholds** form: `rmax`, clearance, movement time, `mth1`–`mth3`
+  - **Apply** — write radar flash (`save`) + ESP timers (NVS)
+  - **Reload from sensor** — `get_all`; **overrides** threshold sliders (+ ESP timers/filter from live)
 
 | Control       | Meaning                               | Default / range |
 | ------------- | ------------------------------------- | --------------- |
+| Filter ON/OFF | Use filtered vs raw distance          | ON              |
+| Track (Q)     | Kalman process noise (higher=faster)  | 0.05 (0.01–0.5) |
+| Smooth (R)    | Kalman meas. noise (higher=smoother)  | 0.4 (0.1–2)     |
 | rmax          | Max detection distance (module)       | 8 m (0.4–12)    |
 | clearance     | Hold occupied after last detect (ESP) | 5 s (0.5–20)    |
 | movement time | Hold MOV before OCC (ESP)             | 1 s (0.5–10)    |
 | mth1–3        | Segment sensitivity (module)          | see table below |
 
-`rmax`/`mth*` come from module `get_all`. Clearance/movement are ESP-side (like ESPHome), not LD1125H UART. Lower `mth*` = more sensitive.
+`rmax`/`mth*` come from module `get_all`. Clearance/movement/filter are ESP-side (NVS), not LD1125H UART. Lower `mth*` = more sensitive.
 
 ## Serial output
 
 When a target is detected the radar sends ASCII lines; firmware prints:
 
-- `MOV 1.23 m` — larger motion (`mov, dis=…`)
-- `OCC 0.85 m` — small motion / static presence (`occ, dis=…`)
+- `MOV 1.23 m (raw 1.25)` — larger motion (`mov, dis=…`); active then raw meters
+- `OCC 0.85 m (raw 0.90)` — small motion / static presence (`occ, dis=…`)
 
 No target → no detection lines. On boot, `get_all` is sent so current thresholds dump to USB Serial and fill the web form.
 

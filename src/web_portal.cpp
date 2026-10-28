@@ -39,15 +39,18 @@ static void sendLiveJson() {
   const uint32_t age =
       (live.last_ms == 0) ? 0 : (millis() - live.last_ms);
 
-  char buf[320];
+  char buf[480];
   snprintf(buf, sizeof(buf),
-           "{\"mode\":\"%s\",\"dis\":%.2f,\"age_ms\":%lu,"
+           "{\"mode\":\"%s\",\"dis\":%.2f,\"dis_raw\":%.2f,\"age_ms\":%lu,"
            "\"rmax\":%.2f,\"mth1\":%.0f,\"mth2\":%.0f,\"mth3\":%.0f,"
            "\"clear_s\":%.1f,\"mov_s\":%.1f,"
+           "\"filter_on\":%s,\"filt_q\":%.2f,\"filt_r\":%.1f,"
            "\"cfg_ok\":%s,\"cfg_seq\":%lu}",
-           modeStr(live.mode), live.distance_m, (unsigned long)age, cfg.rmax,
-           cfg.mth1, cfg.mth2, cfg.mth3, cfg.clear_s, cfg.mov_s,
-           cfg.valid ? "true" : "false", (unsigned long)cfg.seq);
+           modeStr(live.mode), live.distance_m, live.distance_raw_m,
+           (unsigned long)age, cfg.rmax, cfg.mth1, cfg.mth2, cfg.mth3,
+           cfg.clear_s, cfg.mov_s, cfg.filter_enabled ? "true" : "false",
+           cfg.filt_q, cfg.filt_r, cfg.valid ? "true" : "false",
+           (unsigned long)cfg.seq);
   server.send(200, "application/json", buf);
 }
 
@@ -87,6 +90,33 @@ static void handleConfig() {
   server.send(200, "application/json", buf);
 }
 
+static void handleFilter() {
+  if (!server.hasArg("filter_on") || !server.hasArg("filt_q") ||
+      !server.hasArg("filt_r")) {
+    server.send(400, "application/json",
+                "{\"ok\":false,\"err\":\"missing fields\"}");
+    return;
+  }
+
+  const String onArg = server.arg("filter_on");
+  const bool enabled =
+      (onArg == "1" || onArg == "true" || onArg == "TRUE" || onArg == "on");
+  const float q = server.arg("filt_q").toFloat();
+  const float r = server.arg("filt_r").toFloat();
+
+  radarSensorApplyFilterConfig(enabled, q, r);
+
+  RadarConfig cfg;
+  radarSensorGetConfig(&cfg);
+  char buf[192];
+  snprintf(buf, sizeof(buf),
+           "{\"ok\":true,\"filter_on\":%s,\"filt_q\":%.2f,\"filt_r\":%.1f,"
+           "\"cfg_seq\":%lu}",
+           cfg.filter_enabled ? "true" : "false", cfg.filt_q, cfg.filt_r,
+           (unsigned long)cfg.seq);
+  server.send(200, "application/json", buf);
+}
+
 static void handleRefresh() {
   radarSensorRequestGetAll();
   server.send(200, "application/json", "{\"ok\":true}");
@@ -102,6 +132,7 @@ static void setupRoutes() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/api/live", HTTP_GET, handleLive);
   server.on("/api/config", HTTP_POST, handleConfig);
+  server.on("/api/filter", HTTP_POST, handleFilter);
   server.on("/api/refresh", HTTP_POST, handleRefresh);
   server.on("/generate_204", HTTP_GET, handleCaptive);
   server.on("/hotspot-detect.html", HTTP_GET, handleCaptive);
